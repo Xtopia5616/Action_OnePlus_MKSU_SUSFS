@@ -1,4 +1,5 @@
 name: Build OnePlus_SukiSU Ultra All
+
 on:
   workflow_dispatch:
     inputs:
@@ -52,11 +53,11 @@ on:
         default: android15
         options: [android12, android13, android14, android15, android16]
       KERNEL_VERSION:
-       type: choice
-       description: "内核版本"
-       required: true
-       default: "5.15"
-       options: ["5.10", "5.15", "6.1", "6.6", "6.12"]
+        type: choice
+        description: "内核版本"
+        required: true
+        default: "5.15"
+        options: ["5.10", "5.15", "6.1", "6.6", "6.12"]
       BUILD_METHOD:
         type: choice
         description: "编译方式"
@@ -94,10 +95,10 @@ jobs:
           root-reserve-mb: 8192
           temp-reserve-mb: 2048
           swap-size-mb: 8192
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
 
       - name: Configure Git
         run: |
@@ -111,45 +112,61 @@ jobs:
 
       - name: Install repo tool
         run: |
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
           chmod a+x ~/repo
           sudo mv ~/repo /usr/local/bin/repo
 
-      - name: Initialize repo and sync
+      - name: Initialize repo and sync (AOSP fallback)
         run: |
-          mkdir kernel_workspace && cd kernel_workspace
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-          
-          echo "Applying Global Manifest Fix for CodeLinaro issues..."
+
+          echo "Applying AOSP fallback for CodeLinaro inaccessible repos/branches..."
           MANIFEST_FILE=".repo/manifests/${{ github.event.inputs.FEIL }}.xml"
-          
+
           if [ -f "$MANIFEST_FILE" ]; then
-            # 1. 替换失效的 CLO 源为 Google AOSP 镜像
+            # 1) 将 CLO 域名替换为 AOSP
             sed -i 's|https://git.codelinaro.org/clo/la|https://android.googlesource.com|g' "$MANIFEST_FILE"
             sed -i 's|https://git.codelinaro.org/clo/qsdk|https://android.googlesource.com|g' "$MANIFEST_FILE"
 
-            # 2. 动态计算回退分支 (例如: android15-6.6 或 android14-5.15)
+            # 2) 修正 AOSP 上的仓库命名空间（高通/一加的 name 与 AOSP 不同）
+            # external: AOSP 通常在 platform/external/*
+            sed -i 's|name="kernel_platform/external/|name="platform/external/|g' "$MANIFEST_FILE"
+            # prebuilts: AOSP 通常在 platform/prebuilts/*
+            sed -i 's|name="kernel_platform/prebuilts/|name="platform/prebuilts/|g' "$MANIFEST_FILE"
+            # tools: AOSP 通常在 platform/tools/*
+            sed -i 's|name="kernel_platform/tools/|name="platform/tools/|g' "$MANIFEST_FILE"
+            # build: 内核构建相关通常在 kernel/build/*
+            sed -i 's|name="kernel_platform/build/|name="kernel/build/|g' "$MANIFEST_FILE"
+
+            # 3) 动态决定回退分支（用你选择的 ANDROID_VERSION + KERNEL_VERSION）
             TARGET_AV="${{ github.event.inputs.ANDROID_VERSION }}"
             TARGET_KV="${{ github.event.inputs.KERNEL_VERSION }}"
             FALLBACK_BRANCH="${TARGET_AV}-${TARGET_KV}"
-            
             echo "Target AOSP Fallback Branch: $FALLBACK_BRANCH"
-            
-            # 3. 清理 refs/heads/ 前缀，方便正则精准匹配
-            sed -i 's|revision="refs/heads/|revision="|g' "$MANIFEST_FILE"
-            
-            # 4. 精准正则替换：将所有形如 ks-kernel.lnx.xxx 的高通私有分支替换为 AOSP 对应安卓版本的分支
-            # 这样绝对不会误伤一加自己的 oneplus/sm8850 等内核源码分支
+
+            # 4) 去掉 upstream（避免 repo 去抓已消失的分支名）
+            sed -i 's/ upstream="[^"]*"//g' "$MANIFEST_FILE"
+
+            # 5) 将 ks-kernel.lnx.* 这种高通私有分支 revision 强制改为 AOSP 分支
             sed -i "s/revision=\"ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
-            
-            echo "Manifest fix applied. Revisions preview:"
-            grep "revision=" "$MANIFEST_FILE" | head -n 15
+            sed -i "s/revision=\"refs\/heads\/ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
+
+            # 6) 针对 ddk/ddk-external 组：如果 revision 是 40 位 hash（高通私有提交），在 AOSP 上一般不可用，改成分支头
+            # 仅对包含 groups="ddk" / groups="ddk-external" 的项目做处理，避免误伤一加内核主仓。
+            sed -i -E "s/(groups=\"ddk(-external)?\"[^>]*revision=\")([0-9a-f]{40})(\")/\1$FALLBACK_BRANCH\4/g" "$MANIFEST_FILE"
+            sed -i -E "s/(revision=\")([0-9a-f]{40})(\"[^>]*groups=\"ddk(-external)?\")/\1$FALLBACK_BRANCH\3/g" "$MANIFEST_FILE"
+
+            echo "Manifest fixed. Preview:"
+            grep -E 'android.googlesource.com|platform/external|kernel/build|platform/prebuilts' "$MANIFEST_FILE" | head -n 40 || true
           fi
 
-          # 5. 执行同步，增加 --force-sync 解决残留的冲突
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --fail-fast
-          
-          # 清理 bazel 保护导出限制
+          # 7) 同步（不 fail-fast，尽量拉齐；失败可重复触发一次）
+          repo sync -c -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags || repo sync -c -j1 --force-sync --no-clone-bundle --no-tags
+
+          # 8) 兼容性清理
           if [ -e kernel_platform/common/BUILD.bazel ]; then
             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
           fi
@@ -190,12 +207,9 @@ jobs:
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
             cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
             cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib/
-            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto/
-            cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
+            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./commonz4k_oplus ./common/lib/
           fi
-          cd ./common && patch -p1 < *.patch || true
-
-      - name: Apply Hide Stuff Patches
+          cd ./common && patch - -: Apply Hide Stuff Patches
         run: |
           cd kernel_workspace/kernel_platform/common
           [ -f ../../SukiSU_patch/69_hide_stuff.patch ] && cp ../../SukiSU_patch/69_hide_stuff.patch ./ && patch -p1 -F 3 < 69_hide_stuff.patch || true
@@ -231,19 +245,19 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$CONFIG_FILE"
           sed -i 's/check_defconfig//' ./common/build.config.gki || true
-          # (ZRAM 配置逻辑较长，已根据你提供的原件逻辑保持一致)
+          # (ZRAM 配置逻辑较长，按你原始逻辑自行补全)
 
       - name: Build kernel
         if: ${{ github.event.inputs.CPU == 'sm8650' || github.event.inputs.CPU == 'sm7675' }}
         run: |
           cd kernel_workspace
           ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-          
+
       - name: Fallback build kernel
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' }}
         run: |
-         cd kernel_workspace
-         LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+          cd kernel_workspace
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
 
       - name: Make AnyKernel3
         run: |
@@ -254,13 +268,13 @@ jobs:
           dir3="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
           dir4="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
           dir5="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
-          
+
           image_path=""
-          if [ -f "$dir1/Image" ]; then image_path="$dir1/Image"
-          elif [ -f "$dir2/Image" ]; then image_path="$dir2/Image"
-          elif [ -f "$dir3/Image" ]; then image_path="$dir3/Image"
-          elif [ -f "$dir4/Image" ]; then image_path="$dir4/Image"
-          elif [ -f "$dir5/Image" ]; then image_path="$dir5/Image"
+          if [ -f "${dir1}Image" ]; then image_path="${dir1}Image"
+          elif [ -f "${dir2}Image" ]; then image_path="${dir2}Image"
+          elif [ -f "${dir3}Image" ]; then image_path="${dir3}Image"
+          elif [ -f "${dir4}Image" ]; then image_path="${dir4}Image"
+          elif [ -f "${dir5}Image" ]; then image_path="${dir5}Image"
           else image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1); fi
 
           if [ -n "$image_path" ] && [ -f "$image_path" ]; then
@@ -271,7 +285,7 @@ jobs:
 
           if [ "${{ github.event.inputs.CPU }}" = "sm8750" ] || [ "${{ github.event.inputs.CPU }}" = "sm8850" ]; then
             for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
-              [ -f "$dir1$file" ] && cp "$dir1$file" "./AnyKernel3/${file/system_dlkm.erofs.img/system_dlkm.img}" || true
+              [ -f "${dir1}${file}" ] && cp "${dir1}${file}" "./AnyKernel3/${file/system_dlkm.erofs.img/system_dlkm.img}" || true
             done
           fi
 
