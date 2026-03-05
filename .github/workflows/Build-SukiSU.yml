@@ -121,7 +121,9 @@ jobs:
           mkdir -p kernel_workspace
           cd kernel_workspace
 
-          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+            -b refs/heads/oneplus/${{ github.event.inputs.CPU }} \
+            -m ${{ github.event.inputs.FEIL }}.xml --depth=1
 
           echo "Applying AOSP fallback for CodeLinaro inaccessible repos/branches..."
           MANIFEST_FILE=".repo/manifests/${{ github.event.inputs.FEIL }}.xml"
@@ -132,13 +134,9 @@ jobs:
             sed -i 's|https://git.codelinaro.org/clo/qsdk|https://android.googlesource.com|g' "$MANIFEST_FILE"
 
             # 2) 修正 AOSP 上的仓库命名空间（高通/一加的 name 与 AOSP 不同）
-            # external: AOSP 通常在 platform/external/*
             sed -i 's|name="kernel_platform/external/|name="platform/external/|g' "$MANIFEST_FILE"
-            # prebuilts: AOSP 通常在 platform/prebuilts/*
             sed -i 's|name="kernel_platform/prebuilts/|name="platform/prebuilts/|g' "$MANIFEST_FILE"
-            # tools: AOSP 通常在 platform/tools/*
             sed -i 's|name="kernel_platform/tools/|name="platform/tools/|g' "$MANIFEST_FILE"
-            # build: 内核构建相关通常在 kernel/build/*
             sed -i 's|name="kernel_platform/build/|name="kernel/build/|g' "$MANIFEST_FILE"
 
             # 3) 动态决定回退分支（用你选择的 ANDROID_VERSION + KERNEL_VERSION）
@@ -154,8 +152,8 @@ jobs:
             sed -i "s/revision=\"ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
             sed -i "s/revision=\"refs\/heads\/ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
 
-            # 6) 针对 ddk/ddk-external 组：如果 revision 是 40 位 hash（高通私有提交），在 AOSP 上一般不可用，改成分支头
-            # 仅对包含 groups="ddk" / groups="ddk-external" 的项目做处理，避免误伤一加内核主仓。
+            # 6) 针对 ddk/ddk-external：若 revision 是 40 位 hash（AOSP 上一般不可用），改为分支头
+            # 只对 groups=ddk(ddk-external) 的项目动刀，避免误伤一加内核主仓。
             sed -i -E "s/(groups=\"ddk(-external)?\"[^>]*revision=\")([0-9a-f]{40})(\")/\1$FALLBACK_BRANCH\4/g" "$MANIFEST_FILE"
             sed -i -E "s/(revision=\")([0-9a-f]{40})(\"[^>]*groups=\"ddk(-external)?\")/\1$FALLBACK_BRANCH\3/g" "$MANIFEST_FILE"
 
@@ -163,8 +161,9 @@ jobs:
             grep -E 'android.googlesource.com|platform/external|kernel/build|platform/prebuilts' "$MANIFEST_FILE" | head -n 40 || true
           fi
 
-          # 7) 同步（不 fail-fast，尽量拉齐；失败可重复触发一次）
-          repo sync -c -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags || repo sync -c -j1 --force-sync --no-clone-bundle --no-tags
+          # 7) 同步（失败再用 -j1 兜底一次）
+          repo sync -c -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags || \
+            repo sync -c -j1 --force-sync --no-clone-bundle --no-tags
 
           # 8) 兼容性清理
           if [ -e kernel_platform/common/BUILD.bazel ]; then
@@ -200,16 +199,23 @@ jobs:
           cd kernel_workspace
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} --depth=1
           git clone https://github.com/ShirkNeko/SukiSU_patch.git --depth=1
+
           cd kernel_platform
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/ || true
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/ || true
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/ || true
+
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
-            cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
-            cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib/
-            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./commonz4k_oplus ./common/lib/
+            cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/ || true
+            cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib/ || true
+            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto/ || true
+            cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/ || true
           fi
-          cd ./common && patch - -: Apply Hide Stuff Patches
+
+          cd ./common
+          patch -p1 < *.patch || true
+
+      - name: Apply Hide Stuff Patches
         run: |
           cd kernel_workspace/kernel_platform/common
           [ -f ../../SukiSU_patch/69_hide_stuff.patch ] && cp ../../SukiSU_patch/69_hide_stuff.patch ./ && patch -p1 -F 3 < 69_hide_stuff.patch || true
@@ -218,7 +224,9 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform/common
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
-            [ -f ../../SukiSU_patch/other/zram/zram_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ] && cp ../../SukiSU_patch/other/zram/zram_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./ && patch -p1 -F 3 < lz4kd.patch || true
+            [ -f ../../SukiSU_patch/other/zram/zram_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ] && \
+              cp ../../SukiSU_patch/other/zram/zram_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./ && \
+              patch -p1 -F 3 < lz4kd.patch || true
           fi
 
       - name: Add Configuration Settings
@@ -244,8 +252,9 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$CONFIG_FILE"
+
           sed -i 's/check_defconfig//' ./common/build.config.gki || true
-          # (ZRAM 配置逻辑较长，按你原始逻辑自行补全)
+          # (ZRAM 配置逻辑较长：你原来注释说“保持一致”，这里先不展开)
 
       - name: Build kernel
         if: ${{ github.event.inputs.CPU == 'sm8650' || github.event.inputs.CPU == 'sm7675' }}
@@ -257,12 +266,14 @@ jobs:
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' }}
         run: |
           cd kernel_workspace
-          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
+            ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
 
       - name: Make AnyKernel3
         run: |
           git clone https://github.com/Numbersf/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
+
           dir1="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
           dir2="kernel_workspace/kernel_platform/bazel-out/k8-fastbuild/bin/msm-kernel/${{ github.event.inputs.CPUD }}_gki_kbuild_mixed_tree/"
           dir3="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
@@ -300,8 +311,14 @@ jobs:
       - name: Download SUSFS Module
         run: |
           if [ "${{ github.event.inputs.SUSFS_CI }}" = "true" ]; then
-            LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
-            ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | jq -r '.artifacts[0].archive_download_url')
+            LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+              jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
+
+            ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
+              jq -r '.artifacts[0].archive_download_url')
+
             curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o ksu_module_susfs.zip "$ARTIFACT_URL"
             cp ksu_module_susfs.zip ./AnyKernel3/
           else
