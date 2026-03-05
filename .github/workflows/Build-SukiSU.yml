@@ -120,27 +120,44 @@ jobs:
           mkdir kernel_workspace && cd kernel_workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
           
-          # 【自动修复逻辑】：仅当发现 r3-rel 时，将其重定向到 AOSP 的 android14-5.15 分支
-          # 这确保了 sm8650 能编过，同时不影响其他机型
-          echo "Checking and fixing manifest for CodeLinaro issues..."
+          echo "Applying Global Manifest Fix for CodeLinaro issues..."
           MANIFEST_FILE=".repo/manifests/${{ github.event.inputs.FEIL }}.xml"
+          
           if [ -f "$MANIFEST_FILE" ]; then
-            # 只有匹配到 r3-rel 的仓库才会改 remote 和 revision
-            sed -i '/ks-kernel.lnx.5.0.r3-rel/s|https://git.codelinaro.org/clo/la|https://android.googlesource.com|g' "$MANIFEST_FILE"
-            sed -i 's|revision="refs/heads/ks-kernel.lnx.5.0.r3-rel"|revision="refs/heads/android14-5.15"|g' "$MANIFEST_FILE"
-            sed -i 's|revision="ks-kernel.lnx.5.0.r3-rel"|revision="android14-5.15"|g' "$MANIFEST_FILE"
+            # 1. 替换失效的 CLO 源为 Google AOSP 镜像
+            sed -i 's|https://git.codelinaro.org/clo/la|https://android.googlesource.com|g' "$MANIFEST_FILE"
+            sed -i 's|https://git.codelinaro.org/clo/qsdk|https://android.googlesource.com|g' "$MANIFEST_FILE"
+
+            # 2. 动态计算回退分支 (例如: android15-6.6 或 android14-5.15)
+            TARGET_AV="${{ github.event.inputs.ANDROID_VERSION }}"
+            TARGET_KV="${{ github.event.inputs.KERNEL_VERSION }}"
+            FALLBACK_BRANCH="${TARGET_AV}-${TARGET_KV}"
+            
+            echo "Target AOSP Fallback Branch: $FALLBACK_BRANCH"
+            
+            # 3. 清理 refs/heads/ 前缀，方便正则精准匹配
+            sed -i 's|revision="refs/heads/|revision="|g' "$MANIFEST_FILE"
+            
+            # 4. 精准正则替换：将所有形如 ks-kernel.lnx.xxx 的高通私有分支替换为 AOSP 对应安卓版本的分支
+            # 这样绝对不会误伤一加自己的 oneplus/sm8850 等内核源码分支
+            sed -i "s/revision=\"ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
+            
+            echo "Manifest fix applied. Revisions preview:"
+            grep "revision=" "$MANIFEST_FILE" | head -n 15
           fi
 
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          # 5. 执行同步，增加 --force-sync 解决残留的冲突
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --fail-fast
           
+          # 清理 bazel 保护导出限制
           if [ -e kernel_platform/common/BUILD.bazel ]; then
             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
           fi
           if [ -e kernel_platform/msm-kernel/BUILD.bazel ]; then
             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
           fi
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
       - name: Force remove -dirty suffix
         run: |
@@ -268,7 +285,6 @@ jobs:
 
       - name: Download SUSFS Module
         run: |
-          # 保持原有的 SUSFS 下载逻辑
           if [ "${{ github.event.inputs.SUSFS_CI }}" = "true" ]; then
             LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
             ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | jq -r '.artifacts[0].archive_download_url')
