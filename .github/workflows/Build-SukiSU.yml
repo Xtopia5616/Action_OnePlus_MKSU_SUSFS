@@ -133,13 +133,17 @@ jobs:
             sed -i 's|https://git.codelinaro.org/clo/la|https://android.googlesource.com|g' "$MANIFEST_FILE"
             sed -i 's|https://git.codelinaro.org/clo/qsdk|https://android.googlesource.com|g' "$MANIFEST_FILE"
 
-            # 2) 修正 AOSP 上的仓库命名空间（高通/一加的 name 与 AOSP 不同）
+            # 2) 修正 AOSP 上的仓库命名空间与高通错别字
             sed -i 's|name="kernel_platform/external/|name="platform/external/|g' "$MANIFEST_FILE"
             sed -i 's|name="kernel_platform/prebuilts/|name="platform/prebuilts/|g' "$MANIFEST_FILE"
             sed -i 's|name="kernel_platform/tools/|name="platform/tools/|g' "$MANIFEST_FILE"
             sed -i 's|name="kernel_platform/build/|name="kernel/build/|g' "$MANIFEST_FILE"
+            sed -i 's|name="kernel_platform/system/|name="platform/system/|g' "$MANIFEST_FILE"
+            sed -i 's|name="kernel_platform/toolchain/|name="toolchain/|g' "$MANIFEST_FILE"
+            # 修复高通清单文件末尾把 kernel_platform 拼成了 kernelplatform 的错误
+            sed -i 's|name="kernelplatform/|name="platform/|g' "$MANIFEST_FILE"
 
-            # 3) 动态决定回退分支（用你选择的 ANDROID_VERSION + KERNEL_VERSION）
+            # 3) 动态决定回退分支
             TARGET_AV="${{ github.event.inputs.ANDROID_VERSION }}"
             TARGET_KV="${{ github.event.inputs.KERNEL_VERSION }}"
             FALLBACK_BRANCH="${TARGET_AV}-${TARGET_KV}"
@@ -148,20 +152,18 @@ jobs:
             # 4) 去掉 upstream（避免 repo 去抓已消失的分支名）
             sed -i 's/ upstream="[^"]*"//g' "$MANIFEST_FILE"
 
-            # 5) 将 ks-kernel.lnx.* 这种高通私有分支 revision 强制改为 AOSP 分支
+            # 5) 清理高通私有分支名 ks-kernel.lnx.*
             sed -i "s/revision=\"ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
             sed -i "s/revision=\"refs\/heads\/ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
 
-            # 6) 针对 ddk/ddk-external：若 revision 是 40 位 hash（AOSP 上一般不可用），改为分支头
-            # 只对 groups=ddk(ddk-external) 的项目动刀，避免误伤一加内核主仓。
-            sed -i -E "s/(groups=\"ddk(-external)?\"[^>]*revision=\")([0-9a-f]{40})(\")/\1$FALLBACK_BRANCH\4/g" "$MANIFEST_FILE"
-            sed -i -E "s/(revision=\")([0-9a-f]{40})(\"[^>]*groups=\"ddk(-external)?\")/\1$FALLBACK_BRANCH\3/g" "$MANIFEST_FILE"
+            # 6) 【终极清理】凡是 remote="clo-la" 的项目，它的 revision 若为 40 位哈希值，无差别强制替换为 AOSP 分支头！
+            sed -i -E "/remote=\"clo-la\"/ s/revision=\"[0-9a-fA-F]{40}\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
 
-            echo "Manifest fixed. Preview:"
-            grep -E 'android.googlesource.com|platform/external|kernel/build|platform/prebuilts' "$MANIFEST_FILE" | head -n 40 || true
+            echo "Manifest fixed. Preview of AOSP projects:"
+            grep -E 'android.googlesource.com|platform/external|kernel/build|platform/prebuilts|kernel/common-modules' "$MANIFEST_FILE" | head -n 40 || true
           fi
 
-          # 7) 同步（失败再用 -j1 兜底一次）
+          # 7) 同步（依然允许尝试用单线程兜底）
           repo sync -c -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags || \
             repo sync -c -j1 --force-sync --no-clone-bundle --no-tags
 
@@ -172,8 +174,8 @@ jobs:
           if [ -e kernel_platform/msm-kernel/BUILD.bazel ]; then
             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
           fi
-          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
 
       - name: Force remove -dirty suffix
         run: |
@@ -252,9 +254,8 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$CONFIG_FILE"
-
           sed -i 's/check_defconfig//' ./common/build.config.gki || true
-          # (ZRAM 配置逻辑较长：你原来注释说“保持一致”，这里先不展开)
+          # (ZRAM 相关配置如果还需要，请在此处补充)
 
       - name: Build kernel
         if: ${{ github.event.inputs.CPU == 'sm8650' || github.event.inputs.CPU == 'sm7675' }}
