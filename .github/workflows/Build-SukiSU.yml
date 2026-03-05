@@ -139,14 +139,18 @@ jobs:
             sed -i 's|name="kernel_platform/tools/|name="platform/tools/|g' "$MANIFEST_FILE"
             sed -i 's|name="kernel_platform/system/|name="platform/system/|g' "$MANIFEST_FILE"
             sed -i 's|name="kernel_platform/toolchain/|name="toolchain/|g' "$MANIFEST_FILE"
+            # 修复高通清单文件末尾把 kernel_platform 拼成了 kernelplatform 的错误
             sed -i 's|name="kernelplatform/|name="platform/|g' "$MANIFEST_FILE"
             
+            # 【新增】修复 prebuilts-master 路径问题：AOSP 没有 prebuilts-master，只有 prebuilts
+            sed -i 's|name="platform/prebuilts-master/|name="platform/prebuilts/|g' "$MANIFEST_FILE"
+
             # 特殊修复：高通叫 bazel_common_rules，AOSP 叫 kernel/build
             sed -i 's|name="kernel_platform/build/bazel_common_rules"|name="kernel/build"|g' "$MANIFEST_FILE"
             # 兼容其他带有 build/ 的项目
             sed -i 's|name="kernel_platform/build/|name="kernel/build/|g' "$MANIFEST_FILE"
 
-            # 3) 对于这些从 AOSP 拉取的基础工具，统一使用 main 分支！
+            # 3) 统一使用 main 分支 (AOSP 标准分支名)
             FALLBACK_BRANCH="main"
             echo "Target AOSP Fallback Branch: $FALLBACK_BRANCH"
 
@@ -158,7 +162,6 @@ jobs:
             sed -i "s/revision=\"refs\/heads\/ks-kernel\.lnx\.[^\"]*\"/revision=\"$FALLBACK_BRANCH\"/g" "$MANIFEST_FILE"
 
             # 6) 【终极大清洗】无差别干掉所有 40 位哈希锁！
-            # 无论是 trusty 还是 dtc，只要 revision="40个十六进制字符"，统统替换为 main 分支。
             sed -i -E 's/revision="[0-9a-fA-F]{40}"/revision="main"/g' "$MANIFEST_FILE"
 
             echo "Manifest fixed. Preview of AOSP projects:"
